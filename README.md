@@ -1,0 +1,89 @@
+# SOLIDWORKS on Linux with Wine
+
+How to install and run **3DEXPERIENCE SOLIDWORKS for Makers (R2026x, SOLIDWORKS 2026 SP4)** natively on Linux under Wine, without a virtual machine. It covers the tools, scripts and every fix that one working install needed.
+
+> Not affiliated with or endorsed by Dassault Systèmes or Microsoft. SOLIDWORKS, 3DEXPERIENCE and WebView2 are their owners' trademarks.
+> **You need your own valid 3DEXPERIENCE SOLIDWORKS licence.** You sign in with your 3DEXPERIENCE ID exactly as on Windows. Nothing here removes, bypasses or alters any licensing. The fixes only add Windows behaviour that Wine is missing. This repository contains no Dassault or Microsoft files. You download those yourself.
+
+![SOLIDWORKS 2026 for Makers running under Wine](docs/screenshot-part.jpg)
+
+## Status
+
+This is the result of one working install, not a polished installer. Read the whole page before you start.
+
+| | |
+|---|---|
+| Works | Installing with Dassault's own installer; the real 3DEXPERIENCE sign-in page; licence accepted ("Professional for Makers 2026 SP4.0"); new part, sketch, extrude, PropertyManager buttons; opening existing parts from File > Open and by double-clicking them in the file manager; your Linux folders in the Open dialog's left pane |
+| Not tested | Saving, assemblies, drawings, Simulation, Visualize, add-ins; other distributions and other Wine versions; Proton; a fresh install done only with these scripts (see below) |
+| Known broken | On an NVIDIA GPU (PRIME offload) bodies can be selected but their shaded faces are not drawn. Use the integrated (Intel/Mesa) GPU, which is the default. |
+
+**Tested on:** Fedora 44 KDE Plasma (Wayland, SOLIDWORKS runs through XWayland), Fedora's `wine-core-11.20-1.fc44` (Wine 11.20 Staging, WoW64 build), winetricks 20260125, Intel Iris Xe (Mesa) plus an NVIDIA RTX 3070 laptop GPU, 23 GB RAM.
+
+**About the scripts:** the original install was done by hand, step by step, and the scripts in `install/` were written from it afterwards. Each script was checked on its own against a scratch prefix and the files of the working install:
+
+- the prefix setup was run from scratch;
+- the MSI patches, applied to an untouched SOLIDWORKS MSI, give the same feature table and the same edited rows as the working install;
+- the answer file comes out identical;
+- the WebView2 registry entries and launcher fixes match;
+- the patched Wine files are byte-identical.
+
+The full chain from a blank prefix to a running SOLIDWORKS has **not** been re-run with the scripts. Expect to read logs. Issues and fixes are welcome.
+
+## How it works
+
+SOLIDWORKS always runs through `bin/sw-wine`. This wrapper starts Wine inside [bubblewrap](https://github.com/containers/bubblewrap) and, for that process tree only:
+
+- hides `/dev/ntsync`;
+- gives Wine's computer name a hosts entry;
+- swaps in patched private copies of four Wine files: `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll` and `win32u.so`.
+
+The patched copies are generated from *your* Wine's own files on first use and regenerated after a Wine update. Your system's Wine is never modified. [docs/FIXES.md](docs/FIXES.md) explains every fix: what broke, why, and what was changed.
+
+## Install
+
+The full walkthrough is in **[docs/INSTALL.md](docs/INSTALL.md)**. In short:
+
+```bash
+git clone https://github.com/ezeren76neptune/solidworks-wine.git ~/solidworks-wine && cd ~/solidworks-wine
+tools/build.sh                                   # compile the Wine additions (needs gcc, binutils)
+install/setup-prefix.sh                          # Wine prefix: .NET 4.8, fonts, MSXML, Windows 11, settings
+install/install-webview2.sh <WebView2 runtime>   # for the sign-in page
+install/stage-media.sh <SOLIDWORKS bootstrap .zip>
+install/download-cafs.sh                         # ~7 GB of installer archives from Dassault
+install/make-install-json.py --tenant <your platform ID>
+install/run-installer.sh                         # Dassault's installer; stops at the SOLIDWORKS MSI
+install/patch-msis.sh && install/install-msis.sh # MSI fixes, install SOLIDWORKS + Visualize
+install/run-installer.sh                         # second run finishes the install
+install/fix-desktop-entries.sh                   # make the icons use the wrapper
+bin/sw-wine wine 'C:\users\Public\Desktop\SOLIDWORKS Design.lnk'
+```
+
+Then sign in, and turn off **Tools > Options > Performance > Enhanced graphics performance**. Otherwise the 3D view stays black.
+
+If something goes wrong, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Requirements
+
+- x86-64 Linux with Wine 11.x (Staging), `winetricks`, `bwrap` (bubblewrap), `python3`, `gcc` + `binutils` (`ld`, `objcopy`, `nm`), `curl`, `unzip` or `7z`, `cabextract`. You need `podman` only for the optional file-dialog places DLL.
+- About 45 GB of free disk space (the prefix ends up around 36 GB) and a working OpenGL driver.
+- A 3DEXPERIENCE SOLIDWORKS for Makers subscription, plus the SOLIDWORKS installer media and the WebView2 runtime (see INSTALL step 2).
+- The binary patches look for exact code patterns in Wine's files. On a different Wine build they may not find them: the wrapper then reports this and leaves that file alone, or stops in the case of `ntdll`. The `ntdll` patch also needs a Wine build whose PE DLLs keep their symbol table, as Fedora's do.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `bin/sw-wine` | the wrapper every Wine command for this prefix goes through |
+| `install/` | install scripts, the installer answer-file generator, MSI fixes, archive list |
+| `tools/` | the Wine additions (C sources, PE/ELF patchers), the file-dialog places DLL, MSI tools, tests |
+| `docs/` | install guide, explanation of every fix, troubleshooting |
+
+## Credits
+
+- Denis Bonnenfant's patch for [Wine bug 27403](https://bugs.winehq.org/show_bug.cgi?id=27403) (`WM_CAPTURECHANGED`), applied here in binary form.
+- [cryinkfly's SOLIDWORKS-on-Linux project](https://codeberg.org/cryinkfly/SolidWorks-on-Linux) and the WineHQ AppDB reports, for earlier groundwork on SOLIDWORKS under Wine.
+- The Wine project. `tools/ntdll_add.c` mirrors parts of Wine's `dlls/ntdll/loader.c`.
+
+## License
+
+LGPL-2.1-or-later (see [LICENSE](LICENSE)), the same as Wine, because parts are derived from Wine's code.

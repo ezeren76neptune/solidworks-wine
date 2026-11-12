@@ -1,0 +1,122 @@
+#!/bin/bash
+# Run a command in the SOLIDWORKS Wine prefix, with the fixes SOLIDWORKS needs.
+#
+#   sw-wine wine 'C:\users\Public\Desktop\SOLIDWORKS Design.lnk'   start SOLIDWORKS
+#   sw-wine wine foo.exe | sw-wine winetricks ... | sw-wine wineserver -k
+#
+# Everything runs inside bubblewrap (bwrap) so the fixes apply to this process
+# tree only; the system's Wine files are never modified:
+#   * /dev/ntsync is hidden (Wine's in-process sync asserts under .NET load);
+#   * a hosts file that resolves Wine's 15-character computer name;
+#   * patched copies of ntdll.dll, wininet.dll, comctl32_v6.dll and win32u.so
+#     are bound over the system files (see docs/FIXES.md). Each copy is keyed by
+#     the hash of the system file, so a Wine update regenerates it.
+#
+# Environment:
+#   WINEPREFIX   prefix to use (default: <repo>/prefix)
+#   SW_GPU       nvidia = PRIME render offload to an NVIDIA GPU (default: system default GPU)
+#   SW_WINE_PE   Wine's x86_64-windows directory, if it is not found automatically
+SW_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+TOOLS="$SW_ROOT/tools"
+BUILD="$TOOLS/build"
+mkdir -p "$BUILD"
+
+export WINEPREFIX="${WINEPREFIX:-$SW_ROOT/prefix}"
+export WINEARCH=win64
+export WINEDEBUG="${WINEDEBUG:--all}"
+
+if [ "${SW_GPU:-}" = nvidia ]; then
+    export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only
+fi
+# The WebView2 sign-in page: its GPU process needs composition swap chains that
+# Wine lacks, and its sandbox does not work under Wine.
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:---no-sandbox --disable-gpu --disable-gpu-compositing}"
+
+command -v bwrap >/dev/null || { echo "sw-wine: bubblewrap (bwrap) is required" >&2; exit 1; }
+
+# Wine's PE (x86_64-windows) directory: Fedora's WoW64 build, Debian/Ubuntu, Arch, WineHQ packages.
+if [ -z "${SW_WINE_PE:-}" ]; then
+    for d in /usr/lib64/wine-wow64/wine/x86_64-windows /usr/lib64/wine/x86_64-windows \
+             /usr/lib/x86_64-linux-gnu/wine/x86_64-windows /usr/lib/wine/x86_64-windows \
+             /opt/wine-staging/lib/wine/x86_64-windows /opt/wine-devel/lib/wine/x86_64-windows \
+             /opt/wine-stable/lib/wine/x86_64-windows; do
+        [ -e "$d/ntdll.dll" ] && { SW_WINE_PE=$d; break; }
+    done
+fi
+WINE_PE="${SW_WINE_PE:-}"
+[ -e "$WINE_PE/ntdll.dll" ] || { echo "sw-wine: set SW_WINE_PE to Wine's x86_64-windows directory" >&2; exit 1; }
+WINE_UNIX="$(dirname "$WINE_PE")/x86_64-unix"
+
+# Hide /dev/ntsync: wineserver then falls back to server-side synchronisation.
+NOSYNC="$BUILD/.no-ntsync"
+[ -e "$NOSYNC" ] || { : > "$NOSYNC"; chmod 000 "$NOSYNC"; }
+BINDS=()
+[ -e /dev/ntsync ] && BINDS+=(--bind "$NOSYNC" /dev/ntsync)
+
+# Wine's computer name is the hostname cut to 15 characters. SOLIDWORKS resolves
+# it at startup and stalls ("Loading registry...") on DNS timeouts when Linux
+# does not know that name.
+HOSTS="$BUILD/.hosts"
+{ cat /etc/hosts; echo "127.0.0.1 $(hostname -s | cut -c1-15)"; } > "$HOSTS.$$" && mv "$HOSTS.$$" "$HOSTS"
+BINDS+=(--ro-bind "$HOSTS" /etc/hosts)
+
+hash16() { sha256sum "$1" | cut -c1-16; }
+
+# ntdll (required) and wininet: functions Dassault's runtime needs that Wine
+# lacks, injected from the blobs tools/build.sh compiles.
+[ -e "$BUILD/ntdll_add.bin" ] || { echo "sw-wine: run tools/build.sh first" >&2; exit 1; }
+patch_dll() { # dll blob pe-inject-args...
+    local dll=$1 blob=$2 sys="$WINE_PE/$1" out
+    out="$BUILD/${dll%.dll}-$(hash16 "$sys").dll"
+    [ -e "$out" ] || python3 -I "$TOOLS/pe-inject.py" "$sys" "$out" "$BUILD/$blob.bin" \
+        "$BUILD/$blob.syms" "${@:3}" >&2 || exit 1
+    BINDS+=(--ro-bind "$out" "$sys")
+}
+patch_dll ntdll.dll ntdll_add --export RtlIsNameInExpression \
+    --export LdrpHandleTlsData=LdrpHandleTlsData_impl --export LdrpReleaseTlsEntry=LdrpReleaseTlsEntry_impl --ldrp-tls
+patch_dll wininet.dll wininet_setcookieex2 --export InternetSetCookieEx2
+
+# comctl32 v6: the header control crashes on HDM_LAYOUT with a NULL layout, which
+# a SOLIDWORKS task pane sends at startup. The prefix keeps its own copy in winsxs
+# and that copy is the one Wine maps, so bind the fixed file over both.
+CC6="$WINE_PE/comctl32_v6.dll"
+if [ -e "$CC6" ]; then
+    CC6_FIXED="$BUILD/comctl32_v6-$(hash16 "$CC6").dll"
+    [ -e "$CC6_FIXED" ] || python3 -I "$TOOLS/patch-comctl32.py" "$CC6" "$CC6_FIXED" >&2
+    if [ -e "$CC6_FIXED" ]; then
+        BINDS+=(--ro-bind "$CC6_FIXED" "$CC6")
+        for f in "$WINEPREFIX"/drive_c/windows/winsxs/amd64_microsoft.windows.common-controls_*/comctl32.dll; do
+            [ -e "$f" ] && cmp -s "$f" "$CC6" && BINDS+=(--ro-bind "$CC6_FIXED" "$f")
+        done
+    fi
+fi
+
+# win32u: Wine re-sends WM_CAPTURECHANGED to a window that keeps the mouse
+# capture, which swallows clicks on PropertyManager buttons (Wine bug 27403).
+W32U="$WINE_UNIX/win32u.so"
+if [ -e "$W32U" ]; then
+    W32U_FIXED="$BUILD/win32u-$(hash16 "$W32U").so"
+    [ -e "$W32U_FIXED" ] || python3 -I "$TOOLS/patch-win32u.py" "$W32U" "$W32U_FIXED" >&2
+    [ -e "$W32U_FIXED" ] && BINDS+=(--ro-bind "$W32U_FIXED" "$W32U")
+fi
+
+# Optional: the file manager's places (Home, Desktop, Documents, Downloads, ...)
+# in the left pane of Wine's Open/Save dialogs (tools/build-pe.sh builds the DLL).
+# Re-registered when the places, the script or Wine's shell32 change. The import
+# goes through this wrapper so the wineserver it starts keeps ntsync hidden.
+if [ "${1:-}" = wine ] && [ -z "${SW_PLACES_SYNCING:-}" ] && [ -e "$BUILD/swplaces.dll" ] \
+        && [ -d "$WINEPREFIX/drive_c/windows/system32" ]; then
+    PLACES_DLL="$WINEPREFIX/drive_c/windows/system32/swplaces.dll"
+    cmp -s "$BUILD/swplaces.dll" "$PLACES_DLL" || cp "$BUILD/swplaces.dll" "$PLACES_DLL"
+    STAMP=$({ cat "$HOME/.local/share/user-places.xbel" "$HOME/.config/gtk-3.0/bookmarks" \
+                  "$HOME/.config/user-dirs.dirs" "$HOME/.config/sw-wine/places" "$TOOLS/sync-places.py" 2>/dev/null
+              stat -c %s%Y "$WINE_PE/shell32.dll"; } | sha256sum | cut -c1-16)
+    if [ "$(cat "$WINEPREFIX/.sw-places" 2>/dev/null)" != "$STAMP" ]; then
+        REG="$BUILD/places.reg"
+        python3 -I "$TOOLS/sync-places.py" "$REG" >/dev/null &&
+            SW_PLACES_SYNCING=1 "$0" wine regedit /S "Z:${REG//\//\\}" &&
+            echo "$STAMP" > "$WINEPREFIX/.sw-places"
+    fi
+fi
+
+exec bwrap --dev-bind / / "${BINDS[@]}" -- "$@"
