@@ -37,7 +37,8 @@ Every fix that was needed is listed here, grouped by when it bites. "Wine" means
 | The 3D view stays black | With "Enhanced graphics performance" on, SOLIDWORKS makes OpenGL calls with no current context | Turn it off: Tools > Options > Performance |
 | Hang with an `X_CopyArea BadMatch` error (seen on NVIDIA), or a black view | EGL backend of Wine's X11 driver | `X11 Driver\UseEGL=N` (GLX) |
 | The PropertyManager's green check and other buttons do nothing | Wine sends `WM_CAPTURECHANGED` to a window that keeps the capture. The buttons' subclass then drops the click between button-down and button-up (Wine bugs 27403, 58668, 59478) | `tools/patch-win32u.py` applies Denis Bonnenfant's patch from bug 27403 in binary form: in `set_capture_window`, skip the message when the previous window is the same one |
-| No shaded faces on NVIDIA (edges only) | Unknown. Seen with PRIME render offload on an RTX 3070 | Use the integrated GPU, which is the default. `SW_GPU=nvidia` exists for testing |
+| On an NVIDIA GPU (PRIME render offload), the 3D view stops updating: new geometry, view changes and sketches don't appear, or only stale frames and edges show | SOLIDWORKS presents its viewports by drawing into the front buffer and calling `glFlush`; it never calls SwapBuffers. With PRIME offload, the NVIDIA driver only copies a frame to the window, which the integrated GPU displays, on a buffer swap. Wine's EGL backend already emulates front-buffer rendering by mapping front to back and turning the flush into a swap. On NVIDIA, though, its child-window copy fails (`X_CopyArea` BadMatch). Wine's `EmulateModeset` framebuffer path fails too (`GLXMakeContextCurrent` BadMatch), because its internal contexts use pixel format 1 while SOLIDWORKS uses a depth/stencil format | In `SW_GPU=nvidia` mode, `tools/patch-winex11.py` gives GLX drawables the same front-to-back buffer mapping as the EGL path. It copies the three stores from the EGL code of the same binary. The patched `winex11.so` is only used in that mode |
+| Opening a part hangs on NVIDIA: the main thread is stuck resizing the task pane, and the embedded browser's GPU process is gone | Direct3D (DXVK) runs on the NVIDIA GPU in the same session. The exact cause was not found | `SW_GPU=nvidia` keeps DXVK on the integrated GPU with `DXVK_FILTER_DEVICE_NAME`, detected from `/sys/class/drm` (Intel or AMD), and drops the `NV_optimus` Vulkan layer |
 | The Open dialog's left pane shows Wine's My Computer, Trash and "/" instead of your folders | Wine's dialog builds that pane from the desktop namespace. Windows-style "folder shortcut" namespace items (`Instance\InitPropertyBag\Target`) are ignored by Wine's shell32 | `tools/swplaces.c` is a small COM DLL that serves such items using Wine's own FolderShortcut class. `tools/sync-places.py` registers your file manager's places and hides Wine's items (`SFGAO_NONENUMERATED`) |
 | Double-clicking a part in the file manager doesn't start SOLIDWORKS properly | Wine's file associations call plain `wine` | `install/fix-desktop-entries.sh` |
 
@@ -45,7 +46,7 @@ Every fix that was needed is listed here, grouped by when it bites. "Wine" means
 
 `sw-wine` never touches the system's Wine. On each start it:
 
-1. hashes the system's `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll` and `win32u.so`;
+1. hashes the system's `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll` and `win32u.so` (and `winex11.so` in NVIDIA mode);
 2. builds a patched copy of each into `tools/build/` the first time a hash is seen;
 3. bind-mounts each copy over the original, for the SOLIDWORKS process tree only, through bubblewrap.
 

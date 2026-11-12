@@ -15,9 +15,9 @@ This is the result of one working install, not a polished installer. Read the wh
 |---|---|
 | Works | Installing with Dassault's own installer; the real 3DEXPERIENCE sign-in page; licence accepted ("Professional for Makers 2026 SP4.0"); new part, sketch, extrude, PropertyManager buttons; opening existing parts from File > Open and by double-clicking them in the file manager; your Linux folders in the Open dialog's left pane |
 | Not tested | Saving, assemblies, drawings, Simulation, Visualize, add-ins; other distributions and other Wine versions; Proton; a fresh install done only with these scripts (see below) |
-| Known broken | On an NVIDIA GPU (PRIME offload) bodies can be selected but their shaded faces are not drawn. Use the integrated (Intel/Mesa) GPU, which is the default. |
+| NVIDIA GPU | `SW_GPU=nvidia` draws the 3D view on the NVIDIA GPU of a hybrid laptop (PRIME render offload). Tested on an RTX 3070 laptop GPU with driver 615.71: new parts, sketches, extrudes, view changes and opened parts all redraw normally. That mode needs one more patched Wine file (see [FIXES.md](docs/FIXES.md)). The default is the integrated GPU |
 
-**Tested on:** Fedora 44 KDE Plasma (Wayland, SOLIDWORKS runs through XWayland), Fedora's `wine-core-11.20-1.fc44` (Wine 11.20 Staging, WoW64 build), winetricks 20260125, Intel Iris Xe (Mesa) plus an NVIDIA RTX 3070 laptop GPU, 23 GB RAM.
+**Tested on:** Fedora 44 KDE Plasma (Wayland, SOLIDWORKS runs through XWayland), Fedora's `wine-core-11.20-1.fc44` (Wine 11.20 Staging, WoW64 build), winetricks 20260125, Intel Iris Xe (Mesa 26.2) plus an NVIDIA RTX 3070 laptop GPU (driver 615.71), 23 GB RAM.
 
 **About the scripts:** the original install was done by hand, step by step, and the scripts in `install/` were written from it afterwards. Each script was checked on its own against a scratch prefix and the files of the working install:
 
@@ -35,7 +35,7 @@ SOLIDWORKS always runs through `bin/sw-wine`. This wrapper starts Wine inside [b
 
 - hides `/dev/ntsync`;
 - gives Wine's computer name a hosts entry;
-- swaps in patched private copies of four Wine files: `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll` and `win32u.so`.
+- swaps in patched private copies of four Wine files: `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll` and `win32u.so`, plus `winex11.so` when you use the NVIDIA GPU.
 
 The patched copies are generated from *your* Wine's own files on first use and regenerated after a Wine update. Your system's Wine is never modified. [docs/FIXES.md](docs/FIXES.md) explains every fix: what broke, why, and what was changed.
 

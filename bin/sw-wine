@@ -14,7 +14,8 @@
 #
 # Environment:
 #   WINEPREFIX   prefix to use (default: <repo>/prefix)
-#   SW_GPU       nvidia = PRIME render offload to an NVIDIA GPU (default: system default GPU)
+#   SW_GPU       nvidia = 3D view on an NVIDIA GPU via PRIME render offload (hybrid laptops);
+#                default: the system's default (integrated) GPU
 #   SW_WINE_PE   Wine's x86_64-windows directory, if it is not found automatically
 SW_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 TOOLS="$SW_ROOT/tools"
@@ -25,8 +26,22 @@ export WINEPREFIX="${WINEPREFIX:-$SW_ROOT/prefix}"
 export WINEARCH=win64
 export WINEDEBUG="${WINEDEBUG:--all}"
 
-if [ "${SW_GPU:-}" = nvidia ]; then
-    export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __VK_LAYER_NV_optimus=NVIDIA_only
+# SW_GPU=nvidia puts OpenGL (the 3D view) on the NVIDIA GPU. SOLIDWORKS presents its
+# viewports with glFlush on the front buffer, which PRIME offload never shows, so this mode
+# also gets front-buffer emulation in winex11 (tools/patch-winex11.py, bound further down).
+# Direct3D (DXVK, used by the embedded web panels) stays on the integrated GPU: with it on
+# NVIDIA too, opening a part hung.
+SW_GPU="${SW_GPU:-}"
+if [ "$SW_GPU" = nvidia ]; then
+    export __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia
+    if [ -z "${DXVK_FILTER_DEVICE_NAME:-}" ]; then
+        for v in /sys/class/drm/card*/device/vendor; do
+            case $(cat "$v" 2>/dev/null) in
+                0x8086) export DXVK_FILTER_DEVICE_NAME=Intel; break ;;
+                0x1002) export DXVK_FILTER_DEVICE_NAME=AMD; break ;;
+            esac
+        done
+    fi
 fi
 # The WebView2 sign-in page: its GPU process needs composition swap chains that
 # Wine lacks, and its sandbox does not work under Wine.
@@ -98,6 +113,14 @@ if [ -e "$W32U" ]; then
     W32U_FIXED="$BUILD/win32u-$(hash16 "$W32U").so"
     [ -e "$W32U_FIXED" ] || python3 -I "$TOOLS/patch-win32u.py" "$W32U" "$W32U_FIXED" >&2
     [ -e "$W32U_FIXED" ] && BINDS+=(--ro-bind "$W32U_FIXED" "$W32U")
+fi
+
+# NVIDIA mode: front-buffer rendering emulation for GLX drawables (see SW_GPU above).
+X11="$WINE_UNIX/winex11.so"
+if [ "$SW_GPU" = nvidia ] && [ -e "$X11" ]; then
+    X11_FIXED="$BUILD/winex11-$(hash16 "$X11").so"
+    [ -e "$X11_FIXED" ] || python3 -I "$TOOLS/patch-winex11.py" "$X11" "$X11_FIXED" >&2
+    [ -e "$X11_FIXED" ] && BINDS+=(--ro-bind "$X11_FIXED" "$X11")
 fi
 
 # Optional: the file manager's places (Home, Desktop, Documents, Downloads, ...)

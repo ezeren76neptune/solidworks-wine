@@ -23,6 +23,7 @@ Dassault's own logs are in:
 | Grey Wine username/password box | WebView2 is missing or not registered: redo `install/install-webview2.sh`. Don't enter your password into that box. If you did and ticked "save", the password is stored in the prefix |
 | `cannot load JS0PCC.dll` | The patched ntdll isn't in use. Did you start with plain `wine`? |
 | Stuck at "Loading registry…" | The first 15 characters of `hostname -s` must resolve. The wrapper adds them to the hosts file it uses. Check `tools/build/.hosts` |
+| NVIDIA mode: the 3D view freezes or never updates | The patched `winex11.so` isn't in use: start with `SW_GPU=nvidia`, after closing every SOLIDWORKS and Wine process (`bin/sw-wine wineserver -k`). Look for a `patch-winex11` message in the wrapper's output. Check with `nvidia-smi` that `sldworks.exe` is listed |
 | Black 3D view | Enhanced graphics performance is on (Tools > Options > Performance), or Wine is using EGL (`setup-prefix.sh` sets `X11 Driver\UseEGL=N`) |
 | Green check / OK buttons do nothing | The win32u patch isn't applied. Look for a `patch-win32u` message in the wrapper's output |
 | A "no license" error on the next start | Seen once, after a start that had crashed. Stopping everything with `bin/sw-wine wineserver -k` and starting again got past it |

@@ -160,7 +160,7 @@ bin/sw-wine wineserver -k
 
 Never use `wineserver -w` once SOLIDWORKS has run: the Launcher service never exits, so `-w` never returns.
 
-GPU: SOLIDWORKS uses the system's default GPU. `SW_GPU=nvidia bin/sw-wine wine …` forces NVIDIA PRIME offload, but on the tested machine that drew no shaded faces.
+GPU: SOLIDWORKS uses the system's default (integrated) GPU. On a hybrid laptop, start it with `SW_GPU=nvidia bin/sw-wine wine 'C:\users\Public\Desktop\SOLIDWORKS Design.lnk'` to draw the 3D view on the NVIDIA GPU. The web panels keep using the integrated GPU. Close SOLIDWORKS completely (`bin/sw-wine wineserver -k`) before switching modes, otherwise the new start joins the running session in its old mode. A separate menu entry is handy: copy the Wine-made "SOLIDWORKS Design" `.desktop` file and add `SW_GPU=nvidia` after `env` in its `Exec` line.
 
 ## 10. Optional: your Linux folders in the Open dialog
 
