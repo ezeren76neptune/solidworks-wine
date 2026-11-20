@@ -8,14 +8,16 @@
 # tree only; the system's Wine files are never modified:
 #   * /dev/ntsync is hidden (Wine's in-process sync asserts under .NET load);
 #   * a hosts file that resolves Wine's 15-character computer name;
-#   * patched copies of ntdll.dll, wininet.dll, comctl32_v6.dll and win32u.so
-#     are bound over the system files (see docs/FIXES.md). Each copy is keyed by
-#     the hash of the system file, so a Wine update regenerates it.
+#   * patched copies of ntdll.dll, wininet.dll, comctl32_v6.dll, win32u.so and
+#     winex11.so are bound over the system files (see docs/FIXES.md). Each copy is
+#     keyed by the hash of the system file, so a Wine update regenerates it;
+#   * Open/Save dialogs use the desktop's (KDE) file dialog, see SW_FILEDLG.
 #
 # Environment:
 #   WINEPREFIX   prefix to use (default: <repo>/prefix)
 #   SW_GPU       nvidia = 3D view on an NVIDIA GPU via PRIME render offload (hybrid laptops);
 #                default: the system's default (integrated) GPU
+#   SW_FILEDLG   wine = Wine's own Open/Save dialogs instead of KDE's (kdialog)
 #   SW_WINE_PE   Wine's x86_64-windows directory, if it is not found automatically
 SW_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 TOOLS="$SW_ROOT/tools"
@@ -28,7 +30,7 @@ export WINEDEBUG="${WINEDEBUG:--all}"
 
 # SW_GPU=nvidia puts OpenGL (the 3D view) on the NVIDIA GPU. SOLIDWORKS presents its
 # viewports with glFlush on the front buffer, which PRIME offload never shows, so this mode
-# also gets front-buffer emulation in winex11 (tools/patch-winex11.py, bound further down).
+# also needs the win32u changes further down.
 # Direct3D (DXVK, used by the embedded web panels) stays on the integrated GPU: with it on
 # NVIDIA too, opening a part hung.
 SW_GPU="${SW_GPU:-}"
@@ -109,21 +111,39 @@ fi
 # win32u: Wine re-sends WM_CAPTURECHANGED to a window that keeps the mouse
 # capture, which swallows clicks on PropertyManager buttons (Wine bug 27403).
 W32U="$WINE_UNIX/win32u.so"
+W32U_BIND=
 if [ -e "$W32U" ]; then
     W32U_FIXED="$BUILD/win32u-$(hash16 "$W32U").so"
     [ -e "$W32U_FIXED" ] || python3 -I "$TOOLS/patch-win32u.py" "$W32U" "$W32U_FIXED" >&2
-    [ -e "$W32U_FIXED" ] && BINDS+=(--ro-bind "$W32U_FIXED" "$W32U")
+    [ -e "$W32U_FIXED" ] && W32U_BIND="$W32U_FIXED"
 fi
 
-# NVIDIA mode: front-buffer rendering emulation for GLX drawables (see SW_GPU above).
-X11="$WINE_UNIX/winex11.so"
+# NVIDIA mode (see SW_GPU above). SOLIDWORKS draws into the front buffer and presents with
+# glFlush; it also uses the back buffer as scratch (clears it, draws overlays such as the view
+# triad, copies changed strips to the front), so front and back must stay separate buffers.
+# Every GL window therefore goes through Wine's framebuffer surfaces: an FBO with separate
+# front and back, presented to the window with a real swap (tools/patch-win32u-nvidia.py).
+# Saving renders the file's preview into a bitmap; Wine copies that bitmap with a context
+# NVIDIA's GLX rejects, which ended SOLIDWORKS mid-save (tools/patch-win32u-memdc.py).
+# SOLIDWORKS' NVIDIA-only GL_KTX_buffer_region save/restore misses the FBO and leaves trails
+# behind drag previews, so it is hidden from sldworks.exe; SOLIDWORKS then redraws instead,
+# as it does on Mesa. That setting stays in the prefix and changes nothing on other drivers.
 if [ "$SW_GPU" = nvidia ]; then
-    X11_FIXED="$BUILD/winex11-$(hash16 "$X11" 2>/dev/null).so"
-    [ -e "$X11_FIXED" ] || python3 -I "$TOOLS/patch-winex11.py" "$X11" "$X11_FIXED" >&2
-    if [ -e "$X11_FIXED" ]; then
-        BINDS+=(--ro-bind "$X11_FIXED" "$X11")
+    W32U_NV="$BUILD/win32u-nvidia-$(cat "$W32U" "$TOOLS/patch-win32u-nvidia.py" "$TOOLS/patch-win32u-memdc.py" 2>/dev/null | sha256sum | cut -c1-16).so"
+    if [ ! -e "$W32U_NV" ] && [ -n "$W32U_BIND" ]; then
+        python3 -I "$TOOLS/patch-win32u-nvidia.py" "$W32U_BIND" "$W32U_NV.fb" >&2 &&
+            python3 -I "$TOOLS/patch-win32u-memdc.py" "$W32U_NV.fb" "$W32U_NV" >&2
+        rm -f "$W32U_NV.fb"
+    fi
+    if [ -e "$W32U_NV" ]; then
+        W32U_BIND="$W32U_NV"
+        if [ "${1:-}" = wine ] && [ -z "${SW_NV_REG:-}" ] && [ -e "$WINEPREFIX/user.reg" ] &&
+                ! grep -qF '"DisabledExtensions"="GL_KTX_buffer_region"' "$WINEPREFIX/user.reg"; then
+            SW_NV_REG=1 SW_PLACES_SYNCING=1 SW_FILEDLG_SYNCING=1 "$0" wine reg add \
+                'HKCU\Software\Wine\AppDefaults\sldworks.exe\OpenGL' /v DisabledExtensions /d GL_KTX_buffer_region /f >/dev/null
+        fi
     else
-        # Without the patch the 3D view never updates on NVIDIA (and a session like that
+        # Without the patches the 3D view never updates on NVIDIA (and a session like that
         # wedged once). Fall back to the integrated GPU rather than start a broken session.
         MSG="NVIDIA mode needs a patch that does not fit this Wine build; starting on the integrated GPU instead."
         echo "sw-wine: $MSG" >&2
@@ -132,6 +152,39 @@ if [ "$SW_GPU" = nvidia ]; then
         unset __NV_PRIME_RENDER_OFFLOAD __GLX_VENDOR_LIBRARY_NAME DXVK_FILTER_DEVICE_NAME
         SW_GPU=
     fi
+fi
+[ -n "$W32U_BIND" ] && BINDS+=(--ro-bind "$W32U_BIND" "$W32U")
+
+# winex11: keep the keyboard focus where SOLIDWORKS puts it. Typing in a PropertyManager
+# number box makes SOLIDWORKS show small popups (a tooltip, a "Filter Quick Hits" suggestion
+# list); the window manager offered them the focus and Wine accepted, so the box lost the
+# focus after one character (tools/patch-winex11-focus.py).
+X11="$WINE_UNIX/winex11.so"
+if [ -e "$X11" ]; then
+    X11_FIXED="$BUILD/winex11-focus-$(cat "$X11" "$TOOLS/patch-winex11-focus.py" | sha256sum | cut -c1-16).so"
+    [ -e "$X11_FIXED" ] || python3 -I "$TOOLS/patch-winex11-focus.py" "$X11" "$X11_FIXED" >&2
+    [ -e "$X11_FIXED" ] && BINDS+=(--ro-bind "$X11_FIXED" "$X11")
+fi
+
+# Open/Save/Export dialogs: the desktop's own file dialog (kdialog, KDE's file picker as used
+# by Dolphin) instead of Wine's. tools/swfiledlg.dll (built by tools/build-pe.sh) serves
+# CLSID_FileOpenDialog and CLSID_FileSaveDialog, wraps Wine's dialog and only replaces Show().
+# It is registered over comdlg32 in HKLM (Wine's COM has no per-user classes) and re-checked
+# on each start, since a Wine update re-registers comdlg32. SW_FILEDLG=wine, or no kdialog
+# on the system, puts Wine's dialog back.
+if [ "${1:-}" = wine ] && [ -z "${SW_FILEDLG_SYNCING:-}" ] && [ -e "$BUILD/swfiledlg.dll" ] \
+        && [ -e "$WINEPREFIX/system.reg" ]; then
+    FD_WANT=swfiledlg.dll
+    { [ "${SW_FILEDLG:-kde}" = wine ] || ! command -v kdialog >/dev/null; } && FD_WANT=comdlg32.dll
+    if [ "$FD_WANT" = swfiledlg.dll ]; then
+        FD_DLL="$WINEPREFIX/drive_c/windows/system32/swfiledlg.dll"
+        cmp -s "$BUILD/swfiledlg.dll" "$FD_DLL" || cp "$BUILD/swfiledlg.dll" "$FD_DLL"
+    fi
+    for c in DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7 C0B4E2F3-BA21-4773-8DBA-335EC946EB8B; do
+        grep -i -A3 -F "[Software\\\\Classes\\\\CLSID\\\\{$c}\\\\InprocServer32]" "$WINEPREFIX/system.reg" | grep -qi "$FD_WANT" ||
+            SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg add \
+                "HKLM\\Software\\Classes\\CLSID\\{$c}\\InprocServer32" /ve /d "C:\\windows\\system32\\$FD_WANT" /f >/dev/null 2>&1
+    done
 fi
 
 # Optional: the file manager's places (Home, Desktop, Documents, Downloads, ...)

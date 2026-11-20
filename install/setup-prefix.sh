@@ -44,6 +44,13 @@ for d in msvcr110 msvcp110 atl110 vcomp110 concrt140 msvcp140 msvcp140_1 msvcp14
 done
 # GLX instead of EGL for OpenGL: with EGL the viewport stayed black or hung.
 reg 'HKCU\Software\Wine\X11 Driver' /v UseEGL /d N
+# Segoe UI is not part of Wine: SOLIDWORKS asks about it when opening templates and
+# parts, and some lists show boxes for missing symbols. Close matches from the distro.
+for f in 'Segoe UI=Noto Sans' 'Segoe UI Semibold=Noto Sans SemiBold' 'Segoe UI Light=Noto Sans Light' \
+         'Segoe UI Semilight=Noto Sans Light' 'Segoe UI Black=Noto Sans Black' 'Segoe UI Symbol=DejaVu Sans' \
+         'Segoe UI Historic=Noto Sans'; do
+    reg 'HKCU\Software\Wine\Fonts\Replacements' /v "${f%%=*}" /d "${f#*=}"
+done
 # SOLIDWORKS' helpers crash-probe a lot; don't pop up Wine's crash dialog.
 reg 'HKCU\Software\Wine\WineDbg' /v ShowCrashDialog /t REG_DWORD /d 0
 # The WebView2 sign-in page started only with this.

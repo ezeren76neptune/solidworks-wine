@@ -162,15 +162,15 @@ Never use `wineserver -w` once SOLIDWORKS has run: the Launcher service never ex
 
 GPU: SOLIDWORKS uses the system's default (integrated) GPU. On a hybrid laptop, start it with `SW_GPU=nvidia bin/sw-wine wine 'C:\users\Public\Desktop\SOLIDWORKS Design.lnk'` to draw the 3D view on the NVIDIA GPU. The web panels keep using the integrated GPU. Close SOLIDWORKS completely (`bin/sw-wine wineserver -k`) before switching modes, otherwise the new start joins the running session in its old mode. A separate menu entry is handy: copy the Wine-made "SOLIDWORKS Design" `.desktop` file and add `SW_GPU=nvidia` after `env` in its `Exec` line.
 
-## 10. Optional: your Linux folders in the Open dialog
-
-SOLIDWORKS uses Wine's Vista-style Open dialog. By default its left pane lists Wine's own items: My Computer, Trash and "/".
+## 10. Recommended: KDE's file dialog, and your Linux folders in Wine's
 
 ```bash
-tools/build-pe.sh    # builds tools/build/swplaces.dll with MinGW inside a Fedora container (podman)
+tools/build-pe.sh    # builds tools/build/swfiledlg.dll and swplaces.dll with MinGW inside a Fedora container (podman)
 ```
 
-On the next start, the wrapper registers your file manager's places in that pane: Home, Desktop, Documents, Downloads, and so on. It reads KDE's places, or else the XDG folders and GTK bookmarks, and adds "File System". It hides Wine's own items. The old-style dialog's places bar gets the first five places.
+With `kdialog` installed (KDE Plasma has it; elsewhere it is the `kdialog` package), SOLIDWORKS' Open, Save As and Export dialogs are then KDE's own file dialog, the one Dolphin and other KDE applications use: your places, previews, the type list SOLIDWORKS asks for. The file type for Save As and Export follows the extension of the name you pick (`part.step` saves STEP). Options SOLIDWORKS adds to its own dialog (the Open mode and configuration lists, Save As copy options) keep their defaults. To go back to Wine's dialog, start with `SW_FILEDLG=wine`.
+
+Wine's dialog remains the fallback. Its left pane normally lists Wine's own items: My Computer, Trash and "/". On the next start, the wrapper registers your file manager's places in that pane: Home, Desktop, Documents, Downloads, and so on. It reads KDE's places, or else the XDG folders and GTK bookmarks, and adds "File System". It hides Wine's own items. The old-style dialog's places bar gets the first five places.
 
 To add more folders, put lines such as `CAD=~/Documents/CAD` in `~/.config/sw-wine/places`. The wrapper re-registers the list whenever it changes.
 
