@@ -20,12 +20,15 @@ Exits non-zero, writing nothing, if the build does not look as expected.
 """
 import re, struct, sys
 
-# EGL surface create: movl $GL_BACK_LEFT,o1(%rax); mov %rax,%rbx; movl $GL_BACK,o2(%rax); movl $GL_BACK,o3(%rax)
-EGL = re.compile(rb'\xc7\x40(.)\x02\x04\x00\x00\x48\x89\xc3\xc7\x40(.)\x05\x04\x00\x00\xc7\x80(....)\x05\x04\x00\x00', re.S)
+# EGL surface create: movl $GL_BACK_LEFT,o1(%rax); [mov %rax,%rbx]; movl $GL_BACK,o2(%rax); movl $GL_BACK,o3(%rax)
+# (each store with an 8- or 32-bit displacement, depending on where buffer_map sits in this build)
+STORE = rb'\xc7(?:\x40(.)|\x80(....))'
+MOV = rb'(?:\x48\x89\xc3)?'
+EGL = re.compile(STORE + rb'\x02\x04\x00\x00' + MOV + STORE + rb'\x05\x04\x00\x00' + MOV + STORE + rb'\x05\x04\x00\x00', re.S)
 # GLX surface create: call opengl_drawable_create; mov %rax,%r15; test %rax,%rax; je fail;
 #                     shl $5,%rbx; mov 0x90(%r12),%rdx     <- these 12 bytes move to the stub
 GLX = re.compile(rb'\xe8(....)\x49\x89\xc7\x48\x85\xc0\x0f\x84(....)(\x48\xc1\xe3\x05\x49\x8b\x94\x24\x90\x00\x00\x00)', re.S)
-EGL_CALL = re.compile(rb'\xe8(....)\x48\x85\xc0\x0f\x84(....)\xc7\x40.\x02\x04\x00\x00', re.S)
+EGL_CALL = re.compile(rb'\xe8(....)\x48\x85\xc0\x0f\x84(....)\xc7(?:\x40.|\x80....)\x02\x04\x00\x00', re.S)
 
 
 def main(src, dst):
@@ -35,8 +38,10 @@ def main(src, dst):
     egl, glx = list(EGL.finditer(d)), list(GLX.finditer(d))
     if len(egl) != 1 or len(glx) != 1:
         return 'expected one EGL and one GLX surface-create site, found %d/%d' % (len(egl), len(glx))
-    o1, o2 = egl[0].group(1)[0], egl[0].group(2)[0]
-    o3 = struct.unpack('<I', egl[0].group(3))[0]
+    g = egl[0].groups()
+    def disp(d8, d32):
+        return struct.unpack('<b', d8)[0] if d8 is not None else struct.unpack('<i', d32)[0]
+    o1, o2, o3 = disp(g[0], g[1]), disp(g[2], g[3]), disp(g[4], g[5])
     # both sites must call the same function (opengl_drawable_create@plt)
     ec = list(EGL_CALL.finditer(d))
     if len(ec) != 1:
@@ -61,9 +66,11 @@ def main(src, dst):
         return 'unexpected executable segment layout'
     ph, _, off, va, fsz, _ = ex[0]
     cave = (off + fsz + 15) & ~15
-    stub = bytes([0x41, 0xc7, 0x47, o1]) + struct.pack('<I', 0x402)        # movl $GL_BACK_LEFT,o1(%r15)
-    stub += bytes([0x41, 0xc7, 0x47, o2]) + struct.pack('<I', 0x405)       # movl $GL_BACK,o2(%r15)
-    stub += bytes([0x41, 0xc7, 0x87]) + struct.pack('<II', o3, 0x405)      # movl $GL_BACK,o3(%r15)
+    def store(off, value):                                                 # movl $value,off(%r15)
+        if -128 <= off < 128:
+            return bytes([0x41, 0xc7, 0x47]) + struct.pack('<bI', off, value)
+        return bytes([0x41, 0xc7, 0x87]) + struct.pack('<iI', off, value)
+    stub = store(o1, 0x402) + store(o2, 0x405) + store(o3, 0x405)        # GL_BACK_LEFT, GL_BACK, GL_BACK
     stub += moved
     stub += b'\xe9' + struct.pack('<i', (site + len(moved)) - (cave + len(stub) + 5))
     end = cave + len(stub)

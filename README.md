@@ -17,7 +17,7 @@ This is the result of one working install, not a polished installer. Read the wh
 | Not tested | Saving, assemblies, drawings, Simulation, Visualize, add-ins; other distributions and other Wine versions; Proton; a fresh install done only with these scripts (see below) |
 | NVIDIA GPU | `SW_GPU=nvidia` draws the 3D view on the NVIDIA GPU of a hybrid laptop (PRIME render offload). Tested on an RTX 3070 laptop GPU with driver 615.71: new parts, sketches, extrudes, view changes and opened parts all redraw normally. That mode needs one more patched Wine file (see [FIXES.md](docs/FIXES.md)). The default is the integrated GPU |
 
-**Tested on:** Fedora 44 KDE Plasma (Wayland, SOLIDWORKS runs through XWayland), Fedora's `wine-core-11.20-1.fc44` (Wine 11.20 Staging, WoW64 build), winetricks 20260125, Intel Iris Xe (Mesa 26.2) plus an NVIDIA RTX 3070 laptop GPU (driver 615.71), 23 GB RAM.
+**Tested on:** Fedora 44 KDE Plasma (Wayland, SOLIDWORKS runs through XWayland), Fedora's `wine-core` 11.20 and 11.21 (Wine Staging, WoW64 build), winetricks 20260125, Intel Iris Xe (Mesa 26.2) plus an NVIDIA RTX 3070 laptop GPU (drivers 615.71 and 620.70), 23 GB RAM.
 
 **About the scripts:** the original install was done by hand, step by step, and the scripts in `install/` were written from it afterwards. Each script was checked on its own against a scratch prefix and the files of the working install:
 

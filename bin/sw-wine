@@ -117,10 +117,21 @@ fi
 
 # NVIDIA mode: front-buffer rendering emulation for GLX drawables (see SW_GPU above).
 X11="$WINE_UNIX/winex11.so"
-if [ "$SW_GPU" = nvidia ] && [ -e "$X11" ]; then
-    X11_FIXED="$BUILD/winex11-$(hash16 "$X11").so"
+if [ "$SW_GPU" = nvidia ]; then
+    X11_FIXED="$BUILD/winex11-$(hash16 "$X11" 2>/dev/null).so"
     [ -e "$X11_FIXED" ] || python3 -I "$TOOLS/patch-winex11.py" "$X11" "$X11_FIXED" >&2
-    [ -e "$X11_FIXED" ] && BINDS+=(--ro-bind "$X11_FIXED" "$X11")
+    if [ -e "$X11_FIXED" ]; then
+        BINDS+=(--ro-bind "$X11_FIXED" "$X11")
+    else
+        # Without the patch the 3D view never updates on NVIDIA (and a session like that
+        # wedged once). Fall back to the integrated GPU rather than start a broken session.
+        MSG="NVIDIA mode needs a patch that does not fit this Wine build; starting on the integrated GPU instead."
+        echo "sw-wine: $MSG" >&2
+        [ "${1:-}" = wine ] && command -v notify-send >/dev/null &&
+            notify-send -a SOLIDWORKS "SOLIDWORKS: NVIDIA mode unavailable" "$MSG" 2>/dev/null
+        unset __NV_PRIME_RENDER_OFFLOAD __GLX_VENDOR_LIBRARY_NAME DXVK_FILTER_DEVICE_NAME
+        SW_GPU=
+    fi
 fi
 
 # Optional: the file manager's places (Home, Desktop, Documents, Downloads, ...)
