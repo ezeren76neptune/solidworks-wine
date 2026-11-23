@@ -148,7 +148,7 @@ bin/sw-wine wine 'C:\users\Public\Desktop\SOLIDWORKS Design.lnk'
 ```
 
 1. The 3DEXPERIENCE sign-in page opens in a WebView2 window. Sign in yourself. If you see a plain grey Wine "username/password" box instead, WebView2 is missing: close the box without typing your password and redo step 2b.
-2. SOLIDWORKS shows "Loading registry…" and then the main window. The sign-in is remembered for later starts.
+2. SOLIDWORKS shows "Loading registry…" and then the main window. The sign-in is remembered for later starts. When it expires, the same page opens again.
 3. Go to **Tools > Options > System Options > Performance** and turn **off** "Enhanced graphics performance". With it on, the 3D view stays black.
 4. Leave with **File > Exit**, so the setting is saved, and start SOLIDWORKS again.
 
@@ -165,7 +165,7 @@ GPU: SOLIDWORKS uses the system's default (integrated) GPU. On a hybrid laptop, 
 ## 10. Recommended: KDE's file dialog, and your Linux folders in Wine's
 
 ```bash
-tools/build-pe.sh    # builds tools/build/swfiledlg.dll and swplaces.dll with MinGW inside a Fedora container (podman)
+tools/build-pe.sh    # builds tools/build/swfiledlg.dll, swplaces.dll and swopenfolder.exe with MinGW inside a Fedora container (podman)
 ```
 
 With `kdialog` installed (KDE Plasma has it; elsewhere it is the `kdialog` package), SOLIDWORKS' Open, Save As and Export dialogs are then KDE's own file dialog, the one Dolphin and other KDE applications use: your places, previews, the type list SOLIDWORKS asks for. The file type for Save As and Export follows the extension of the name you pick (`part.step` saves STEP). Options SOLIDWORKS adds to its own dialog (the Open mode and configuration lists, Save As copy options) keep their defaults. To go back to Wine's dialog, start with `SW_FILEDLG=wine`.

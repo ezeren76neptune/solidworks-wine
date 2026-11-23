@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Windows-side helpers (build/swplaces.dll, build/swfiledlg.dll) with MinGW in a Fedora container,
+# Build the Windows-side helpers (build/swplaces.dll, build/swfiledlg.dll, build/swopenfolder.exe) with MinGW in a Fedora container,
 # so nothing has to be installed on the host. The image is built once and reused.
 set -e
 cd "$(dirname "$0")"
@@ -30,3 +30,7 @@ podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD:/src" -w 
     x86_64-w64-mingw32-gcc -O2 -Wall -shared -s -static-libgcc -Wl,--no-insert-timestamp -o build/swfiledlg.dll \
         swfiledlg.c build/swfiledlg.def -lshell32 -lshlwapi -lole32 -luuid -luser32
 ls -l build/swfiledlg.dll
+podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD:/src" -w /src "$IMAGE" \
+    x86_64-w64-mingw32-gcc -O2 -Wall -s -municode -mwindows -static-libgcc -Wl,--no-insert-timestamp -o build/swopenfolder.exe \
+        swopenfolder.c -lshell32
+ls -l build/swopenfolder.exe

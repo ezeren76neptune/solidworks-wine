@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Inject a code blob into a PE32+ DLL and export functions from it.
 
-usage: pe-inject.py IN.dll OUT.dll BLOB.bin BLOB.syms [--export Name[=symbol]]... [--ldrp-tls]
+usage: pe-inject.py IN.dll OUT.dll BLOB.bin BLOB.syms [--export Name[=symbol]]... [--replace Name=symbol]... [--ldrp-tls]
 
 BLOB.bin is a flat, position-independent blob; BLOB.syms is `nm` output for it.
 The blob goes into a new section (.swx) together with a rebuilt export
 directory; nothing else in the image moves. Blob symbols named slot_<Export>
 are 32-bit slots (holding 0x5a5a5a5a) that get the distance to that export of
 the DLL; symslot_<name> slots get the distance to that COFF symbol of the DLL.
+--replace points an existing export at a blob symbol; slot_<Name> still gets
+the original function, so the blob can wrap it.
 
 --ldrp-tls (ntdll only) also lays out, in the spare room at the end of .text
 and .rdata, what Dassault's in-memory DLL loader scans ntdll for:
@@ -67,9 +69,9 @@ class PE:
         funcs = list(struct.unpack_from('<%dI' % nfuncs, self.d, self.off(funcs_rva)))
         names = [self.cstr(r) for r in struct.unpack_from('<%dI' % nnames, self.d, self.off(names_rva))]
         ords = list(struct.unpack_from('<%dH' % nnames, self.d, self.off(ords_rva)))
-        for f in funcs:
-            assert not (rva <= f < rva + size), 'forwarder exports are not handled'
-        return hdr, funcs, names, ords
+        # forwarders ("DLL.Function" strings inside the export directory) as {index: string}
+        fwd = {i: self.cstr(f) for i, f in enumerate(funcs) if rva <= f < rva + size}
+        return hdr, funcs, names, ords, fwd
 
     def coff_symbols(self):
         ptr, count = struct.unpack_from('<II', self.d, self.pe + 12)
@@ -133,13 +135,16 @@ def ldrp_tls_layout(pe, new_va, syms):
 
 def main(argv):
     src, dst, blob_path, syms_path = argv[:4]
-    want, ldrp = [], False
+    want, repl, ldrp = [], [], False
     args = argv[4:]
     while args:
         a = args.pop(0)
         if a == '--export':
             name, _, sym = args.pop(0).partition('=')
             want.append((name, sym or name))
+        elif a == '--replace':
+            name, _, sym = args.pop(0).partition('=')
+            repl.append((name.encode(), sym))
         elif a == '--ldrp-tls':
             ldrp = True
         else:
@@ -154,7 +159,7 @@ def main(argv):
         if len(parts) == 3:
             syms[parts[2]] = int(parts[0], 16)
 
-    hdr, funcs, names, ords = pe.exports()
+    hdr, funcs, names, ords, fwd = pe.exports()
     flags, stamp, vmaj, vmin, name_rva, base, nfuncs, nnames = hdr[:8]
     want = [(n, s) for n, s in want if n.encode() not in names]
     secs = pe.sections()
@@ -169,6 +174,8 @@ def main(argv):
     for sym, slot in syms.items():
         if sym.startswith('slot_'):
             target = by_name[sym[5:].encode()]
+            assert ords[names.index(sym[5:].encode())] not in fwd, sym[5:] + ' is a forwarder, not code'
+
         elif sym.startswith('symslot_'):
             coff = coff or pe.coff_symbols()
             found = coff.get(sym[8:], set())
@@ -178,6 +185,10 @@ def main(argv):
             continue
         assert struct.unpack_from('<i', blob, slot)[0] == 0x5a5a5a5a, 'slot marker missing in ' + sym
         struct.pack_into('<i', blob, slot, target - (new_va + slot))
+
+    for name, sym in repl:                    # after the slots: they keep the original
+        funcs[ords[names.index(name)]] = new_va + syms[sym]
+        fwd.pop(ords[names.index(name)], None)
 
     code = bytes(blob) + b'\xcc' * (-len(blob) % 16)
     exp_off = len(code)                       # export data starts after the code
@@ -195,6 +206,10 @@ def main(argv):
     for n_, _ in entries:
         str_rva.append(new_va + p_str + len(strings))
         strings += n_ + b'\0'
+    # forwarders must point into the (new) export directory to stay forwarders
+    for i, target in sorted(fwd.items()):
+        funcs[i] = new_va + p_str + len(strings)
+        strings += target + b'\0'
     exp = bytearray(struct.pack('<IIHHIIIIIII', flags, stamp, vmaj, vmin, new_va + p_str, base, len(funcs),
                                 len(entries), new_va + p_funcs, new_va + p_names, new_va + p_ords))
     exp += struct.pack('<%dI' % len(funcs), *funcs)
@@ -217,8 +232,9 @@ def main(argv):
     struct.pack_into('<II', d, pe.ddir, new_va + exp_off, len(exp))
     struct.pack_into('<I', d, pe.opt + 64, 0)   # checksum
     open(dst, 'wb').write(d)
-    print('%s: section .swx at rva %#x, exports added: %s%s' % (
-        dst, new_va, ', '.join(n for n, _ in want) or 'none', '; ' + note if note else ''))
+    print('%s: section .swx at rva %#x, exports added: %s%s%s' % (
+        dst, new_va, ', '.join(n for n, _ in want) or 'none',
+        '; replaced: ' + ', '.join(n.decode() for n, _ in repl) if repl else '', '; ' + note if note else ''))
 
 
 if __name__ == '__main__':

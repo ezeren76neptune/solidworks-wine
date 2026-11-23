@@ -46,8 +46,11 @@ if [ "$SW_GPU" = nvidia ]; then
     fi
 fi
 # The WebView2 sign-in page: its GPU process needs composition swap chains that
-# Wine lacks, and its sandbox does not work under Wine.
-export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:---no-sandbox --disable-gpu --disable-gpu-compositing}"
+# Wine lacks (it crashed three times before falling back), and its sandbox does not
+# work under Wine. Dassault's WebView2Loader.dll (2021) ignores the
+# WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable, so these go in as a registry policy
+# further down.
+WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing"
 
 command -v bwrap >/dev/null || { echo "sw-wine: bubblewrap (bwrap) is required" >&2; exit 1; }
 
@@ -77,28 +80,41 @@ HOSTS="$BUILD/.hosts"
 { cat /etc/hosts; echo "127.0.0.1 $(hostname -s | cut -c1-15)"; } > "$HOSTS.$$" && mv "$HOSTS.$$" "$HOSTS"
 BINDS+=(--ro-bind "$HOSTS" /etc/hosts)
 
-hash16() { sha256sum "$1" | cut -c1-16; }
+hash16() { cat "$@" | sha256sum | cut -c1-16; }
 
 # ntdll (required) and wininet: functions Dassault's runtime needs that Wine
 # lacks, injected from the blobs tools/build.sh compiles.
-[ -e "$BUILD/ntdll_add.bin" ] || { echo "sw-wine: run tools/build.sh first" >&2; exit 1; }
+for b in ntdll_add wininet_add shell32_add uxtheme_add; do
+    [ -e "$BUILD/$b.bin" ] || { echo "sw-wine: run tools/build.sh first" >&2; exit 1; }
+done
 patch_dll() { # dll blob pe-inject-args...
     local dll=$1 blob=$2 sys="$WINE_PE/$1" out
-    out="$BUILD/${dll%.dll}-$(hash16 "$sys").dll"
+    out="$BUILD/${dll%.dll}-$(hash16 "$sys" "$BUILD/$blob.bin").dll"
     [ -e "$out" ] || python3 -I "$TOOLS/pe-inject.py" "$sys" "$out" "$BUILD/$blob.bin" \
         "$BUILD/$blob.syms" "${@:3}" >&2 || exit 1
     BINDS+=(--ro-bind "$out" "$sys")
 }
 patch_dll ntdll.dll ntdll_add --export RtlIsNameInExpression \
     --export LdrpHandleTlsData=LdrpHandleTlsData_impl --export LdrpReleaseTlsEntry=LdrpReleaseTlsEntry_impl --ldrp-tls
-patch_dll wininet.dll wininet_setcookieex2 --export InternetSetCookieEx2
+# wininet: InternetSetCookieEx2 (sign-in cookie handoff), and no password box for a 401
+# that offers no scheme WinINet can answer (expired sign-in, tools/wininet_errordlg.c).
+patch_dll wininet.dll wininet_add --export InternetSetCookieEx2 --replace InternetErrorDlg=InternetErrorDlg_wrap
+# shell32: SOLIDWORKS' "Show in Folder" calls SHOpenFolderAndSelectItems, which in Wine only works
+# with Wine's own explorer; show the file in the Linux file manager instead (tools/shell32_openfolder.c).
+patch_dll shell32.dll shell32_add --replace SHOpenFolderAndSelectItems=SHOpenFolderAndSelectItems_wrap
+# uxtheme: themed check boxes and buttons hand their own paint DC to the parent through
+# DrawThemeParentBackground; SOLIDWORKS' PropertyManager pages ReleaseDC() it, and Wine then disabled
+# it, so "Draft outward" and the Direction 2 check box stayed blank. The parent now paints into a
+# private memory DC, as with Windows' buffered painting (tools/uxtheme_parentbg.c).
+patch_dll uxtheme.dll uxtheme_add --replace DrawThemeParentBackground=DrawThemeParentBackground_wrap
 
 # comctl32 v6: the header control crashes on HDM_LAYOUT with a NULL layout, which
-# a SOLIDWORKS task pane sends at startup. The prefix keeps its own copy in winsxs
+# a SOLIDWORKS task pane sends at startup, and themed toolbars left unpainted slots
+# black (the S-key shortcut bar). The prefix keeps its own copy in winsxs
 # and that copy is the one Wine maps, so bind the fixed file over both.
 CC6="$WINE_PE/comctl32_v6.dll"
 if [ -e "$CC6" ]; then
-    CC6_FIXED="$BUILD/comctl32_v6-$(hash16 "$CC6").dll"
+    CC6_FIXED="$BUILD/comctl32_v6-$(cat "$CC6" "$TOOLS/patch-comctl32.py" | sha256sum | cut -c1-16).dll"
     [ -e "$CC6_FIXED" ] || python3 -I "$TOOLS/patch-comctl32.py" "$CC6" "$CC6_FIXED" >&2
     if [ -e "$CC6_FIXED" ]; then
         BINDS+=(--ro-bind "$CC6_FIXED" "$CC6")
@@ -109,11 +125,14 @@ if [ -e "$CC6" ]; then
 fi
 
 # win32u: Wine re-sends WM_CAPTURECHANGED to a window that keeps the mouse
-# capture, which swallows clicks on PropertyManager buttons (Wine bug 27403).
+# capture, which swallows clicks on PropertyManager buttons (Wine bug 27403), and
+# its mouse-leave tracking ignored captures, so a toolbar tooltip could stay up.
+# It also moved child windows given HWND_TOPMOST, which Windows leaves in place:
+# PropertyManager group headers slid off the page on every repaint.
 W32U="$WINE_UNIX/win32u.so"
 W32U_BIND=
 if [ -e "$W32U" ]; then
-    W32U_FIXED="$BUILD/win32u-$(hash16 "$W32U").so"
+    W32U_FIXED="$BUILD/win32u-$(cat "$W32U" "$TOOLS/patch-win32u.py" | sha256sum | cut -c1-16).so"
     [ -e "$W32U_FIXED" ] || python3 -I "$TOOLS/patch-win32u.py" "$W32U" "$W32U_FIXED" >&2
     [ -e "$W32U_FIXED" ] && W32U_BIND="$W32U_FIXED"
 fi
@@ -129,7 +148,7 @@ fi
 # behind drag previews, so it is hidden from sldworks.exe; SOLIDWORKS then redraws instead,
 # as it does on Mesa. That setting stays in the prefix and changes nothing on other drivers.
 if [ "$SW_GPU" = nvidia ]; then
-    W32U_NV="$BUILD/win32u-nvidia-$(cat "$W32U" "$TOOLS/patch-win32u-nvidia.py" "$TOOLS/patch-win32u-memdc.py" 2>/dev/null | sha256sum | cut -c1-16).so"
+    W32U_NV="$BUILD/win32u-nvidia-$(cat "$W32U" "$TOOLS/patch-win32u.py" "$TOOLS/patch-win32u-nvidia.py" "$TOOLS/patch-win32u-memdc.py" 2>/dev/null | sha256sum | cut -c1-16).so"
     if [ ! -e "$W32U_NV" ] && [ -n "$W32U_BIND" ]; then
         python3 -I "$TOOLS/patch-win32u-nvidia.py" "$W32U_BIND" "$W32U_NV.fb" >&2 &&
             python3 -I "$TOOLS/patch-win32u-memdc.py" "$W32U_NV.fb" "$W32U_NV" >&2
@@ -139,7 +158,7 @@ if [ "$SW_GPU" = nvidia ]; then
         W32U_BIND="$W32U_NV"
         if [ "${1:-}" = wine ] && [ -z "${SW_NV_REG:-}" ] && [ -e "$WINEPREFIX/user.reg" ] &&
                 ! grep -qF '"DisabledExtensions"="GL_KTX_buffer_region"' "$WINEPREFIX/user.reg"; then
-            SW_NV_REG=1 SW_PLACES_SYNCING=1 SW_FILEDLG_SYNCING=1 "$0" wine reg add \
+            SW_FOLDER_SYNCING=1 SW_NV_REG=1 SW_PLACES_SYNCING=1 SW_FILEDLG_SYNCING=1 "$0" wine reg add \
                 'HKCU\Software\Wine\AppDefaults\sldworks.exe\OpenGL' /v DisabledExtensions /d GL_KTX_buffer_region /f >/dev/null
         fi
     else
@@ -154,6 +173,20 @@ if [ "$SW_GPU" = nvidia ]; then
     fi
 fi
 [ -n "$W32U_BIND" ] && BINDS+=(--ro-bind "$W32U_BIND" "$W32U")
+
+# wineserver: the sign-in page is drawn by msedgewebview2.exe into a child of the
+# launcher's window. A process cannot use another process's window surface, so Wine
+# draws such a child straight onto the X11 window, and the launcher's next surface
+# flush painted its own (white) copy back over the page: it went white a few seconds
+# after each redraw and the text cursor never showed. wineserver now keeps the parent's
+# surface off children owned by another process, as it does for OpenGL children
+# (tools/patch-wineserver.py).
+WSRV="$(readlink -f "$(command -v wineserver)" 2>/dev/null)"
+if [ -n "$WSRV" ] && [ -e "$WSRV" ]; then
+    WSRV_FIXED="$BUILD/wineserver-$(cat "$WSRV" "$TOOLS/patch-wineserver.py" | sha256sum | cut -c1-16)"
+    [ -e "$WSRV_FIXED" ] || { python3 -I "$TOOLS/patch-wineserver.py" "$WSRV" "$WSRV_FIXED" >&2 && chmod +x "$WSRV_FIXED"; }
+    [ -x "$WSRV_FIXED" ] && BINDS+=(--ro-bind "$WSRV_FIXED" "$WSRV")
+fi
 
 # winex11: keep the keyboard focus where SOLIDWORKS puts it. Typing in a PropertyManager
 # number box makes SOLIDWORKS show small popups (a tooltip, a "Filter Quick Hits" suggestion
@@ -182,9 +215,51 @@ if [ "${1:-}" = wine ] && [ -z "${SW_FILEDLG_SYNCING:-}" ] && [ -e "$BUILD/swfil
     fi
     for c in DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7 C0B4E2F3-BA21-4773-8DBA-335EC946EB8B; do
         grep -i -A3 -F "[Software\\\\Classes\\\\CLSID\\\\{$c}\\\\InprocServer32]" "$WINEPREFIX/system.reg" | grep -qi "$FD_WANT" ||
-            SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg add \
+            SW_FOLDER_SYNCING=1 SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg add \
                 "HKLM\\Software\\Classes\\CLSID\\{$c}\\InprocServer32" /ve /d "C:\\windows\\system32\\$FD_WANT" /f >/dev/null 2>&1
     done
+fi
+
+# Folders SOLIDWORKS hands to the Windows shell ("open"/"explore", e.g. showing where a file
+# is) open in Dolphin ($SW_FILE_MANAGER, else xdg-open) instead of Wine's file browser:
+# tools/swopenfolder.exe becomes the Folder class's open and explore command, and Wine's DDE
+# route to its own explorer (folder\shell\open\ddeexec) is removed.
+if [ "${1:-}" = wine ] && [ -z "${SW_FOLDER_SYNCING:-}" ] && [ -e "$BUILD/swopenfolder.exe" ] \
+        && [ -e "$WINEPREFIX/system.reg" ]; then
+    OF_EXE="$WINEPREFIX/drive_c/windows/system32/swopenfolder.exe"
+    cmp -s "$BUILD/swopenfolder.exe" "$OF_EXE" || cp "$BUILD/swopenfolder.exe" "$OF_EXE"
+    if ! grep -A3 -F '[Software\\Classes\\folder\\shell\\explore\\command]' "$WINEPREFIX/system.reg" | grep -q swopenfolder ||
+            grep -qF '[Software\\Classes\\folder\\shell\\open\\ddeexec]' "$WINEPREFIX/system.reg"; then
+        for v in open explore; do
+            SW_FOLDER_SYNCING=1 SW_WV2_SYNCING=1 SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg add \
+                "HKLM\\Software\\Classes\\folder\\shell\\$v\\command" /ve /d '"C:\windows\system32\swopenfolder.exe" "%1"' /f >/dev/null 2>&1
+        done
+        SW_FOLDER_SYNCING=1 SW_WV2_SYNCING=1 SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg delete \
+            'HKLM\Software\Classes\folder\shell\open\ddeexec' /f >/dev/null 2>&1
+    fi
+fi
+# WebView2 browser arguments (WV2_ARGS above). This runtime takes the
+# AdditionalBrowserArguments policy only from HKLM with the value name "*".
+if [ "${1:-}" = wine ] && [ -z "${SW_WV2_SYNCING:-}" ] && [ -e "$WINEPREFIX/system.reg" ] &&
+        ! grep -qF "\"*\"=\"$WV2_ARGS\"" "$WINEPREFIX/system.reg"; then
+    SW_WV2_SYNCING=1 SW_FOLDER_SYNCING=1 SW_FILEDLG_SYNCING=1 SW_PLACES_SYNCING=1 SW_NV_REG=1 "$0" wine reg add \
+        'HKLM\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments' \
+        /v '*' /d "$WV2_ARGS" /f >/dev/null 2>&1
+fi
+
+# The core fonts winetricks installs (1998-2000 Arial, Verdana, Times, ...) ask for no
+# anti-aliasing at ordinary text sizes, and WebView2 drew the sign-in page's text jagged
+# and unevenly spaced. tools/fix-font-gasp.py lets them be smoothed at every size, like
+# the versions in current Windows; re-run when the script changes.
+FONTS="$WINEPREFIX/drive_c/windows/Fonts"
+if [ "${1:-}" = wine ] && [ -d "$FONTS" ]; then
+    FSTAMP=$(sha256sum < "$TOOLS/fix-font-gasp.py" | cut -c1-16)
+    if [ "$(cat "$WINEPREFIX/.sw-fonts" 2>/dev/null)" != "$FSTAMP" ]; then
+        COREFONTS=$(cd "$FONTS" && ls andalemo.ttf arial*.ttf ariblk.ttf comic*.ttf cour*.ttf georgia*.ttf \
+                    impact.ttf times*.ttf trebuc*.ttf verdana*.ttf 2>/dev/null)
+        [ -z "$COREFONTS" ] || (cd "$FONTS" && python3 -I "$TOOLS/fix-font-gasp.py" $COREFONTS >/dev/null) &&
+            echo "$FSTAMP" > "$WINEPREFIX/.sw-fonts"
+    fi
 fi
 
 # Optional: the file manager's places (Home, Desktop, Documents, Downloads, ...)
@@ -201,7 +276,7 @@ if [ "${1:-}" = wine ] && [ -z "${SW_PLACES_SYNCING:-}" ] && [ -e "$BUILD/swplac
     if [ "$(cat "$WINEPREFIX/.sw-places" 2>/dev/null)" != "$STAMP" ]; then
         REG="$BUILD/places.reg"
         python3 -I "$TOOLS/sync-places.py" "$REG" >/dev/null &&
-            SW_PLACES_SYNCING=1 "$0" wine regedit /S "Z:${REG//\//\\}" &&
+            SW_FOLDER_SYNCING=1 SW_PLACES_SYNCING=1 "$0" wine regedit /S "Z:${REG//\//\\}" &&
             echo "$STAMP" > "$WINEPREFIX/.sw-places"
     fi
 fi

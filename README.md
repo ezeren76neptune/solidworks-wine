@@ -35,8 +35,9 @@ SOLIDWORKS always runs through `bin/sw-wine`. This wrapper starts Wine inside [b
 
 - hides `/dev/ntsync`;
 - gives Wine's computer name a hosts entry;
-- swaps in patched private copies of five Wine files: `ntdll.dll`, `wininet.dll`, `comctl32_v6.dll`, `win32u.so` (with extra changes when you use the NVIDIA GPU) and `winex11.so`;
+- swaps in patched private copies of eight Wine files: `ntdll.dll`, `wininet.dll`, `shell32.dll`, `uxtheme.dll`, `comctl32_v6.dll`, `win32u.so` (with extra changes when you use the NVIDIA GPU), `winex11.so` and `wineserver`;
 - registers `swfiledlg.dll`, which shows KDE's file dialog (`kdialog`) for SOLIDWORKS' Open, Save As and Export dialogs.
+- registers `swopenfolder.exe`, so folders SOLIDWORKS opens through the Windows shell show up in Dolphin, not in Wine's file browser, and "Show in Folder" shows the file selected there.
 
 The patched copies are generated from *your* Wine's own files on first use and regenerated after a Wine update. Your system's Wine is never modified. [docs/FIXES.md](docs/FIXES.md) explains every fix: what broke, why, and what was changed.
 
