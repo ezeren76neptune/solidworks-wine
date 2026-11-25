@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Windows-side helpers (build/swplaces.dll, build/swfiledlg.dll, build/swopenfolder.exe) with MinGW in a Fedora container,
+# Build the Windows-side helpers (build/swplaces.dll, build/swfiledlg.dll, build/swopenfolder.exe, build/autoattach.exe) with MinGW in a Fedora container,
 # so nothing has to be installed on the host. The image is built once and reused.
 set -e
 cd "$(dirname "$0")"
@@ -34,3 +34,9 @@ podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD:/src" -w 
     x86_64-w64-mingw32-gcc -O2 -Wall -s -municode -mwindows -static-libgcc -Wl,--no-insert-timestamp -o build/swopenfolder.exe \
         swopenfolder.c -lshell32
 ls -l build/swopenfolder.exe
+# autoattach.exe: lets keyboard focus reach embedded WebView2 pages (the Installation Manager's
+# serial boxes); see docs/INSTALL-STANDALONE.md
+podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD:/src" -w /src "$IMAGE" \
+    x86_64-w64-mingw32-gcc -O2 -Wall -s -static-libgcc -Wl,--no-insert-timestamp -o build/autoattach.exe \
+        autoattach.c
+ls -l build/autoattach.exe

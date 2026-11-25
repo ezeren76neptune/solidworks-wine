@@ -1,6 +1,6 @@
 # Installing SOLIDWORKS for Makers under Wine
 
-This walkthrough follows the one install that works (see the status note in the [README](../README.md)). Allow an afternoon for it.
+This walkthrough follows the one install that works (see the status note in the [README](../README.md)). Allow an afternoon for it. For desktop SOLIDWORKS with a serial number, see [INSTALL-STANDALONE.md](INSTALL-STANDALONE.md) instead.
 
 Every Wine command for this prefix goes through `bin/sw-wine`. That includes `wine`, `winetricks`, `regedit` and `wineserver -k`. Starting anything in the prefix with plain `wine` skips the fixes, and it can also start a wineserver that sees `/dev/ntsync`, which then breaks later commands. The scripts below use the wrapper for you.
 

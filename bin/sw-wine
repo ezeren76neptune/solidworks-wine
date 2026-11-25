@@ -8,8 +8,9 @@
 # tree only; the system's Wine files are never modified:
 #   * /dev/ntsync is hidden (Wine's in-process sync asserts under .NET load);
 #   * a hosts file that resolves Wine's 15-character computer name;
-#   * patched copies of ntdll.dll, wininet.dll, comctl32_v6.dll, win32u.so and
-#     winex11.so are bound over the system files (see docs/FIXES.md). Each copy is
+#   * patched copies of ntdll.dll, wininet.dll (64- and 32-bit), shell32.dll, uxtheme.dll,
+#     comctl32_v6.dll, win32u.so, winex11.so and wineserver are bound over the system
+#     files (see docs/FIXES.md). Each copy is
 #     keyed by the hash of the system file, so a Wine update regenerates it;
 #   * Open/Save dialogs use the desktop's (KDE) file dialog, see SW_FILEDLG.
 #
@@ -19,6 +20,9 @@
 #                default: the system's default (integrated) GPU
 #   SW_FILEDLG   wine = Wine's own Open/Save dialogs instead of KDE's (kdialog)
 #   SW_WINE_PE   Wine's x86_64-windows directory, if it is not found automatically
+#   SW_WV2_EXTRA extra WebView2 browser arguments, e.g. --remote-debugging-port=9222 to drive the
+#                Installation Manager's pages (docs/INSTALL-STANDALONE.md). Every sw-wine command
+#                run while a WebView2 program is open must pass the same value
 SW_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 TOOLS="$SW_ROOT/tools"
 BUILD="$TOOLS/build"
@@ -50,7 +54,7 @@ fi
 # work under Wine. Dassault's WebView2Loader.dll (2021) ignores the
 # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS variable, so these go in as a registry policy
 # further down.
-WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing"
+WV2_ARGS="--no-sandbox --disable-gpu --disable-gpu-compositing${SW_WV2_EXTRA:+ $SW_WV2_EXTRA}"
 
 command -v bwrap >/dev/null || { echo "sw-wine: bubblewrap (bwrap) is required" >&2; exit 1; }
 
@@ -87,18 +91,36 @@ hash16() { cat "$@" | sha256sum | cut -c1-16; }
 for b in ntdll_add wininet_add shell32_add uxtheme_add; do
     [ -e "$BUILD/$b.bin" ] || { echo "sw-wine: run tools/build.sh first" >&2; exit 1; }
 done
-patch_dll() { # dll blob pe-inject-args...
-    local dll=$1 blob=$2 sys="$WINE_PE/$1" out
-    out="$BUILD/${dll%.dll}-$(hash16 "$sys" "$BUILD/$blob.bin").dll"
-    [ -e "$out" ] || python3 -I "$TOOLS/pe-inject.py" "$sys" "$out" "$BUILD/$blob.bin" \
-        "$BUILD/$blob.syms" "${@:3}" >&2 || exit 1
+patch_dll() { # dll blob pe-inject-args...   (PATCH_POST=<tools script> IN OUT: applied afterwards)
+    local dll=$1 blob=$2 sys="$WINE_PE/$1" out post="${PATCH_POST:-}"
+    out="$BUILD/${dll%.dll}-$(hash16 "$sys" "$BUILD/$blob.bin" ${post:+"$TOOLS/$post"}).dll"
+    if [ ! -e "$out" ]; then
+        python3 -I "$TOOLS/pe-inject.py" "$sys" "$out.tmp" "$BUILD/$blob.bin" \
+            "$BUILD/$blob.syms" "${@:3}" >&2 || exit 1
+        # a post patch that does not fit this Wine build leaves the pe-inject result
+        if [ -z "$post" ] || ! python3 -I "$TOOLS/$post" "$out.tmp" "$out" >&2; then
+            mv "$out.tmp" "$out"
+        fi
+        rm -f "$out.tmp"
+    fi
     BINDS+=(--ro-bind "$out" "$sys")
 }
 patch_dll ntdll.dll ntdll_add --export RtlIsNameInExpression \
     --export LdrpHandleTlsData=LdrpHandleTlsData_impl --export LdrpReleaseTlsEntry=LdrpReleaseTlsEntry_impl --ldrp-tls
 # wininet: InternetSetCookieEx2 (sign-in cookie handoff), and no password box for a 401
 # that offers no scheme WinINet can answer (expired sign-in, tools/wininet_errordlg.c).
-patch_dll wininet.dll wininet_add --export InternetSetCookieEx2 --replace InternetErrorDlg=InternetErrorDlg_wrap
+# Also: InternetSetFilePointer back to the start before the first read threw away a reply sent
+# with "Cache-Control: no-store" (Wine re-reads from its cache file, which then does not exist),
+# so the SOLIDWORKS Installation Manager got empty replies: "Could not connect to the SOLIDWORKS
+# server" (tools/patch-wininet-seek.py).
+PATCH_POST=patch-wininet-seek.py patch_dll wininet.dll wininet_add --export InternetSetCookieEx2 --replace InternetErrorDlg=InternetErrorDlg_wrap
+# The Installation Manager (sldIM.exe) is 32-bit, so the same fix goes into the i386 wininet.dll.
+NET32="$(dirname "$WINE_PE")/i386-windows/wininet.dll"
+if [ -e "$NET32" ]; then
+    NET32_FIXED="$BUILD/wininet32-$(hash16 "$NET32" "$TOOLS/patch-wininet-seek.py").dll"
+    [ -e "$NET32_FIXED" ] || python3 -I "$TOOLS/patch-wininet-seek.py" "$NET32" "$NET32_FIXED" >&2 || true
+    [ -e "$NET32_FIXED" ] && BINDS+=(--ro-bind "$NET32_FIXED" "$NET32")
+fi
 # shell32: SOLIDWORKS' "Show in Folder" calls SHOpenFolderAndSelectItems, which in Wine only works
 # with Wine's own explorer; show the file in the Linux file manager instead (tools/shell32_openfolder.c).
 patch_dll shell32.dll shell32_add --replace SHOpenFolderAndSelectItems=SHOpenFolderAndSelectItems_wrap

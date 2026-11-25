@@ -38,3 +38,18 @@ Dassault's own logs are in:
 | Open/Save show Wine's dialog instead of KDE's | `tools/build/swfiledlg.dll` is missing (run `tools/build-pe.sh`), `kdialog` isn't installed, or `SW_FILEDLG=wine` is set. The wrapper re-registers the DLL on the next start |
 | `wineserver -w` never returns | Expected once the 3DEXPERIENCE Launcher service runs. Use `bin/sw-wine wineserver -k` |
 | The installer stops on an MSI other than SOLIDWORKS | Find the failing action in the MSI log (`/l*v`). The tools `C:\swtools\msisql.exe` and `msifeat.exe` (from `install/build-msi-tools.sh`) can query and edit MSI tables under Wine, as `install/patch-msis.sh` does |
+
+### Serial-number install ([INSTALL-STANDALONE.md](INSTALL-STANDALONE.md))
+
+The Installation Manager's own logs are in `prefix/drive_c/users/<you>/AppData/Roaming/SOLIDWORKS/Installation Logs/<version>/` (`Other Logs\sldIMLog_*.txt` is UTF-16: `iconv -f utf-16le -t utf-8`). The MSI logs from the install scripts are in `C:\swtools`. **`solidworks-sim-msi.log` contains your serial number.**
+
+| What you see | Look at |
+|---|---|
+| Typing into the Installation Manager does nothing | `tools/build/autoattach.exe` isn't running (`bin/sw-wine wine tools/build/autoattach.exe &`), or `tools/build-pe.sh` hasn't been run since updating |
+| "Could not connect to the SOLIDWORKS server…" | The 32-bit `wininet.dll` isn't the patched one. Look for `InternetSetFilePointer keeps buffered data (32-bit …)` in the wrapper's output and restart Wine (`bin/sw-wine wineserver -k`): Wine keeps the DLLs it loaded first. `tools/tests/seektest.c` replays the request |
+| "A Windows reboot is pending…" | Delete `PendingFileRenameOperations` (INSTALL-STANDALONE step 2). Don't use `wineboot -r` |
+| "Cannot start SOLIDWORKS Installation Manager without Microsoft WebView2 runtime" | Its page rebuild failed. Start it again; when using `SW_WV2_EXTRA`, pass the same value to every `sw-wine` command and don't connect before the rebuild |
+| "Unzip failed" on SOLIDWORKS Design | Expected. Finish the Installation Manager and run `install/install-sim-msi.sh` |
+| `install-sim-msi.sh` ends with `msiexec-exit=1603` | Run it again with `WINEDEBUG=err+msi` and look for `execute_script … halted; action …` in `C:\swtools\solidworks-sim-msi-wine.err`: that is the step that failed. Make it continue on error the way the script does for the Toolbox steps |
+| eDrawings: "Could not load file or assembly 'PresentationFramework.Aero2'", or a black window | `install/wpf-fixes.sh` |
+| eDrawings opened from the icon while already open doesn't show the file | Open it from inside eDrawings (File > Open), or start eDrawings with the file when it isn't running |

@@ -56,11 +56,29 @@ Every fix that was needed is listed here, grouped by when it bites. "Wine" means
 | The Open dialog's left pane shows Wine's My Computer, Trash and "/" instead of your folders | Wine's dialog builds that pane from the desktop namespace. Windows-style "folder shortcut" namespace items (`Instance\InitPropertyBag\Target`) are ignored by Wine's shell32 | `tools/swplaces.c` is a small COM DLL that serves such items using Wine's own FolderShortcut class. `tools/sync-places.py` registers your file manager's places and hides Wine's items (`SFGAO_NONENUMERATED`) |
 | Double-clicking a part in the file manager doesn't start SOLIDWORKS properly | Wine's file associations call plain `wine` | `install/fix-desktop-entries.sh` |
 
+## Serial-number installs
+
+These came up installing SOLIDWORKS Standard 2026 SP5.2 with the SOLIDWORKS Installation Manager and a serial number ([INSTALL-STANDALONE.md](INSTALL-STANDALONE.md)), on Wine 11.21.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The Installation Manager's pages take clicks, but typed text never arrives: the serial boxes stay empty | The pages are WebView2, whose window (`Chrome_WidgetWin_1`, owned by `msedgewebview2.exe`) is a child of the Installation Manager's window. Windows attaches the input queues of two threads when one's window is the parent of the other's, so keyboard focus can move into the page. Wine doesn't: focus stayed on the Installation Manager's own window, and `GetGUIThreadInfo` showed the browser thread with no focus at all | `tools/autoattach.c` (`tools/build/autoattach.exe`) walks the window tree every half second and calls `AttachThreadInput(child thread, parent thread)` for every cross-thread parent/child pair, as Windows does when the window is created |
+| "Could not connect to the SOLIDWORKS server to determine which products you are entitled to install", although the network works. The log shows `HTTP 200` from `im.solidworks.com/…/Connect.aspx`, then "Connect did not return <status> node" and an empty "CONNECT OUTPUT" | The Installation Manager sends its request, then calls `InternetSetFilePointer(request, 0, NULL, FILE_BEGIN)` before its first `InternetReadFile`. Wine's `HTTPREQ_SetFilePointer` always empties the read buffer (`read_pos = read_size = 0`) and relies on reading the data again from the WinINet cache file. Dassault's server answers `Cache-Control: no-cache, no-store`, so Wine keeps no cache file: the 212-byte reply that arrived with the headers is thrown away and the read returns 0 bytes. Windows keeps the data | `tools/patch-wininet-seek.py` replaces the store that empties the buffer with a stub in the spare room at the end of `.text`: when the new position lies within the data already buffered, it advances `read_pos` and shrinks `read_size`; anything else behaves as before. It finds the site by its exact instruction bytes in both the 64-bit and the 32-bit `wininet.dll` (`sldIM.exe` is 32-bit, so the wrapper binds the patched i386 copy too). `tools/tests/seektest.c` replays the call sequence |
+| "A Windows reboot is pending from a previous installation" | The WebView2 installer the Installation Manager runs queues `PendingFileRenameOperations` (delete `EdgeWebView` on reboot). Wine never reboots | Delete that registry value. `wineboot -r` would carry out the delete |
+| The page appears, then "Cannot start SOLIDWORKS Installation Manager without Microsoft WebView2 runtime" | On every start the Installation Manager decides its first WebView2 "failed to connect", reinstalls the runtime and creates the page again, reusing the running browser. That second creation fails ("Failed to create WebViewController") when the browser arguments changed in between (the wrapper rewrites them on each run), or when a DevTools client was connected before it | Start it again. When driving it over the DevTools port, set the port from the start and don't connect before the rebuild (see INSTALL-STANDALONE step 6) |
+| "Unzip failed" on SOLIDWORKS Design | `InstallSpatialIOP`, as in the main install | `install/install-sim-msi.sh` installs the MSI directly, with the same edits as `patch-msis.sh` |
+| The direct msiexec install rolls back right after `ProcessComponents` (`execute_script … SldToolboxUpdater returned 1603` with `WINEDEBUG=err+msi`) | The Toolbox steps run `DatabaseConverter.exe` (MS Access to SQLite, 32-bit .NET). It dies under Wine with a `Win32Exception` in `Process.MainModule` | `SldToolboxUpdater`, `UpdateBrowserData` and `WriteToolboxStandardsXML` continue on error (+64). The Hole Wizard database (`swbrowser.sldedb`) is installed anyway |
+| The Installation Manager installs almost nothing of SOLIDWORKS: it passes only six features in `ADDLOCAL` | Wine's MSI adds no parent features | `install-sim-msi.sh` adds their parents and follow-parent children, plus the Windows feature list from the main install |
+| eDrawings and File Utilities roll back | Their deferred `regsvr32` registrations (thumbnail and property handlers, shell extensions) can fail under Wine | `install/install-sim-extras.sh`: every deferred custom action continues on error |
+| eDrawings stops with "Could not load file or assembly 'PresentationFramework.Aero2'" | The Windows 8+ WPF theme assembly is not part of the .NET 4.8 that winetricks installs | `install/wpf-fixes.sh` takes the Microsoft-signed assembly from the Windows 10 package inside the cached .NET 4.8 installer and puts it into the GAC and the WPF folders |
+| eDrawings' window stays black | WPF draws through Direct3D 9, here DXVK | `HKCU\Software\Microsoft\Avalon.Graphics\DisableHWAcceleration=1` (`install/wpf-fixes.sh`): WPF draws in software |
+| During the install, `swboengine.exe` (Task Scheduler) shows "…\swScheduler\lang\english directory could not be found" and "Failed to load swBoEngineResu.dll" | It is started before its language files are in place | Press OK; the install goes on |
+
 ## How the patched files are made
 
 `sw-wine` never touches the system's Wine. On each start it:
 
-1. hashes the system's `ntdll.dll`, `wininet.dll`, `shell32.dll`, `uxtheme.dll`, `comctl32_v6.dll`, `win32u.so`, `winex11.so` and `wineserver`;
+1. hashes the system's `ntdll.dll`, `wininet.dll` (64- and 32-bit), `shell32.dll`, `uxtheme.dll`, `comctl32_v6.dll`, `win32u.so`, `winex11.so` and `wineserver`;
 2. builds a patched copy of each into `tools/build/` the first time a hash is seen;
 3. bind-mounts each copy over the original, for the SOLIDWORKS process tree only, through bubblewrap.
 
@@ -68,10 +86,13 @@ After a Wine update, new copies are made automatically. The patchers look for ex
 
 - `tools/build.sh` compiles `ntdll_add.c` and `wininet_setcookieex2.c` as freestanding, position-independent blobs: no imports, `-fPIE`, a flat linker script.
 - `tools/pe-inject.py` adds such a blob to a PE DLL. It puts the blob in a new `.swx` section and rebuilds the export directory. It also fills "slots" in the blob with the distance to DLL exports (`slot_<name>`) or to internal symbols from the DLL's COFF symbol table (`symslot_<name>`). The blob can then call into the DLL without relocations.
+- Patchers that change Wine's own code in place (`patch-comctl32.py`, `patch-wininet-seek.py`, …) put their stub into the unused room between the end of `.text` and the end of its file section, and extend `.text`'s virtual size to cover it. In the wrapper, `PATCH_POST=<script>` runs such a patcher on a `pe-inject.py` result.
 
 Tests (Windows programs, built with the prefix's `csc.exe` or MinGW) are in `tools/tests/`:
 
 - `rtltest` checks `RtlIsNameInExpression`;
 - `cookietest` checks `InternetSetCookieEx2`;
 - `tlstest` checks the TLS functions; pass it a DLL that has a TLS directory;
-- `placestest` checks the file-dialog places.
+- `placestest` checks the file-dialog places;
+- `seektest` replays the Installation Manager's server check (`InternetSetFilePointer` to 0, then read) and prints the reply; build it with `-lwininet`, as 32-bit to test the i386 copy;
+- `focusmon` prints the foreground window and each thread's active and focus windows when they change, for keyboard-focus problems such as the WebView2 one above.
